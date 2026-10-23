@@ -1,60 +1,76 @@
-from .unit import Unit
+"""Player decisions, economy and finite-pool unit ownership."""
+
+from __future__ import annotations
+
+from collections import deque
+from typing import Any
+
 from .base import Base
 from .bench import Bench
-from .shop import Shop
 from .field import Field
 from .pool import Pool
-import numpy as np
-import random
-import copy
+from .rules import Rules, resolve_rules
+from .shop import Shop
+from .unit import Unit
+from .util import role_for_status
 
-MSG = 'message'
-ERROR = 'error'
+MSG = "message"
+ERROR = "error"
+MAX_LEVEL = 10
+MAX_ACTION_HISTORY = 4096
+
 
 class Player(Base):
-    def __init__(self, player_id, name, pool):
-        self.player_id = player_id
-        self.name = name
-        self.hp = 30
-        self.field = Field()
-        self.bench = Bench()
-        self.shop = Shop()
-        self.pool : Pool = pool
-        self.gold = 0
-        self.level = 1
+    """Own a team and shop under a versioned economy profile."""
+
+    def __init__(self, player_id: str, name: str, pool: Pool, rules: Rules | None = None):
+        self.player_id, self.name = player_id, name
+        self.rules = resolve_rules(rules)
+        self.hp = self.rules.starting_hp
+        self.field, self.bench, self.shop = Field(), Bench(), Shop()
+        self.pool = pool
+        self.gold, self.level = self.rules.starting_gold, self.rules.starting_level
+        self.field.max_units = self.level
         self.exp = 0
-        self.req_exp_list = [0,2,2,6,10,20,36,48,76,84, float("inf")]
+        self.req_exp_list = [0, 2, 2, 6, 10, 20, 36, 48, 76, 84, float("inf")]
         self.streak = 0
         self.active = False
-        self.log = []
-        self.combat_result_list = []
-        self.interest_list = []
-        self.streak_gold_list = []
-        self.turn_gold_list = []
-        
-    def is_alive(self):
+        self.is_bot = False
+        self.income_turn = 0
+        self.log: deque[dict[str, Any]] = deque(maxlen=MAX_ACTION_HISTORY)
+        self.combat_result_list: list[int] = []
+        self.interest_list: list[int] = []
+        self.streak_gold_list: list[int] = []
+        self.turn_gold_list: list[int] = []
+
+    def is_alive(self) -> bool:
+        """Return whether this player remains in the match."""
         return self.hp > 0
-    
-    def get_damage(self, amount):
-        self.hp -= amount
-        
-    def observe(self):
+
+    def get_damage(self, amount: int) -> None:
+        """Apply nonnegative damage, clamping displayed health at zero."""
+        self.hp = max(0, self.hp - max(0, amount))
+
+    def observe(self) -> dict[str, Any]:
+        """Expose this player's own decision state with role-rich units."""
+        return self.to_json()
+
+    def economy(self) -> dict[str, int]:
+        """Forecast next preparation income from current gold and streak."""
+        base = self.rules.base_income(self.income_turn)
+        interest = min(max(self.gold, 0) // 10, 5)
+        streak = self.rules.streak_income(self.streak)
+        next_interest = min((interest + 1) * 10, 50)
         return {
-            "id": self.player_id,
-            "name": self.name,
-            "level": self.level,
-            "hp": self.hp,
-            "field": self.field.observe(),
-            "bench": self.bench.observe(),
-            "shop": self.shop.observe(),
-            "gold": self.gold,
-            "exp": self.exp,
-            "req_exp": self.get_required_exp(),
-            "unit_rate": self.get_appearance_rate(),
-            "streak": self.streak
+            "base": base,
+            "interest": interest,
+            "streak": streak,
+            "total": base + interest + streak,
+            "next_interest": next_interest,
         }
-        
-    def to_json(self):
+
+    def to_json(self) -> dict[str, Any]:
+        """Serialize current resources, private shop and available decisions."""
         return {
             "id": self.player_id,
             "name": self.name,
@@ -65,354 +81,301 @@ class Player(Base):
             "shop": self.shop.to_json(),
             "gold": self.gold,
             "exp": self.exp,
-            "req_exp": self.get_required_exp(),
+            "req_exp": self.get_required_exp() if self.level < MAX_LEVEL else None,
             "unit_rate": self.get_appearance_rate(),
             "streak": self.streak,
             "active": self.active,
+            "ruleset": self.rules.name,
+            "economy": self.economy(),
+            "is_bot": self.is_bot,
+            "legal_actions": self.legal_actions(),
         }
-    
-    def get_required_exp(self):
+
+    def legal_actions(self) -> dict[str, Any]:
+        """Describe economy/shop actions only; move and sale legality is not enumerated."""
+        enabled = self.active and self.is_alive()
+        offers = []
+        for index, unit in enumerate(self.shop.units):
+            if unit is None or unit.cost > self.gold or not enabled:
+                continue
+            has_room = not self.bench.is_full()
+            can_merge = self.bench.count(unit) + self.field.count(unit) >= 2
+            if has_room or can_merge:
+                offers.append(index)
+        return {
+            "scope": "economy_and_shop",
+            "reroll": enabled and self.gold >= 2,
+            "buy_exp": enabled and self.gold >= 4 and self.level < MAX_LEVEL,
+            "buy_unit": offers,
+        }
+
+    def get_required_exp(self) -> float:
+        """Return experience needed for the next level."""
         return self.req_exp_list[self.level]
 
-    def player_level_up(self):
-        required_exp = self.get_required_exp()
-        self.exp -= required_exp
+    def player_level_up(self) -> str:
+        """Spend accumulated experience for one level and team slot."""
+        self.exp -= int(self.get_required_exp())
         self.field.level_up()
         self.level += 1
-        self.log.append({'type': 'level_up', 'args': self.level})
+        self.log.append({"type": "level_up", "args": self.level})
         return f"{self.name} level up to {self.level}"
 
-    def purchase_exp(self):
-        if not self.is_alive():
-            return {
-                MSG: [f"{self.name} is not alive"]
-            }
-        if self.level >= 10:
-            return {
-                MSG: [f"{self.name}'s level is max"]
-            }
-        elif self.gold < 4:
-            return {
-                MSG: [f"{self.name}'s gold is not enough to buy EXP"]
-            }
-        else:
-            self.gold -= 4
-            self.exp += 4
-            messages = [f"{self.name} buy EXP"]
-            self.log.append({'type': 'buy_exp', 'args': self.exp})
-            while self.level < 10 and self.exp >= self.get_required_exp():
-                messages.append(self.player_level_up())
-            return {
-                MSG: messages
-            }
-            
-    def give_exp(self, exp_amount: int):
-        if not self.is_alive():
-            return {
-                MSG: [f"{self.name} is not alive"]
-            }
-        if self.level >= 10:
-            return {
-                MSG: [f"{self.name}'s level is max"]
-            }
-        else:
-            self.exp += exp_amount
-            messages = [f"{self.name} get {exp_amount} EXP"]
-            self.log.append({'type': 'get_exp', 'args': self.exp})
-            while self.level < 10 and self.exp >= self.get_required_exp():
-                messages.append(self.player_level_up())
-            return {
-                MSG: messages
-            }
+    def purchase_exp(self) -> dict[str, list[str]]:
+        """Buy four experience for four gold when alive and below max level."""
+        if not self.is_alive() or self.level >= MAX_LEVEL or self.gold < 4:
+            return {MSG: [f"{self.name} cannot buy EXP"]}
+        self.gold -= 4
+        self.log.append({"type": "buy_exp", "args": 4})
+        return self.give_exp(4)
 
-    def swap(self, where: list[Unit], source_index: int, target_index: int):
-        if source_index > target_index:
-            _unit = where.pop(source_index)
-            where.insert(target_index, _unit)
-        elif source_index < target_index:
-            _unit = where.pop(source_index)
-            where.insert(target_index - 1, _unit)
-        else:
-            pass
+    def give_exp(self, exp_amount: int) -> dict[str, list[str]]:
+        """Grant experience and perform at most ten level transitions."""
+        if not self.is_alive() or self.level >= MAX_LEVEL:
+            return {MSG: [f"{self.name} cannot gain EXP"]}
+        self.exp += max(0, exp_amount)
+        messages = [f"{self.name} get {exp_amount} EXP"]
+        self.log.append({"type": "get_exp", "args": exp_amount})
+        for _ in range(MAX_LEVEL):
+            if self.level >= MAX_LEVEL or self.exp < self.get_required_exp():
+                return {MSG: messages}
+            messages.append(self.player_level_up())
+        raise RuntimeError("Player exceeded the bounded level progression")
 
-    def move_unit(self, source_type: str, target_type: str, source_index: int, target_index: int):
-        if not self.is_alive():
-            return {
-                MSG: [f"{self.name} is not alive"]
-            }
-        source = None
-        target = None
-        source_index = int(source_index)
-        target_index = int(target_index)
-        if source_type in ['bench', 'b']:
-            source_type = 'bench'
-            source:Bench = self.bench
-        else:
-            source_type = 'field'
-            source:Field = self.field
-        if target_type in ['bench', 'b']:
-            target_type = 'bench'
-            target:Bench = self.bench
-        else:
-            target_type = 'field'
-            target:Field = self.field
-        if source_index > source.num_slots or target_index > target.num_slots:
-            return {
-                MSG: [f"{self.name} tried invalid pop or insert"]
-            }
-        elif source_index < 0:
-            return {
-                MSG: [f"{self.name} tried invalid pop or insert"]
-            }
-        try:
-            source_unit = source.pop(source_index)
-            if source_unit is None:
-                return {
-                    MSG: [f"{self.name} tried to move none"]
-                }
-            target_unit = target.pop(target_index)
-            if target_index == -1:
-                if target_type == source_type:
-                    source.units[source_index] = source_unit
-                    return {
-                        MSG: [f"{self.name} invalid move"]
-                    }
-                target_index = target.find_empty()
-            if source_index == target_index and source_type == target_type:
-                source.units[source_index] = source_unit
-                return {
-                    MSG: [f"{self.name} move same position"]
-                }
-            elif target.is_full():
-                source.units[source_index] = source_unit
-                target.units[target_index] = target_unit
-                return {
-                    MSG: [f"{self.name} {target_type} is full"]
-                }
-            target.units[target_index] = source_unit
-            source.units[source_index] = target_unit
-            self.log.append({'type': 'move_unit'})
-            return {
-                MSG: [f"{self.name} moved {source_unit.unit_id} ({source_type},{source_index}) <-> {target_unit.unit_id if target_unit is not None else None} ({target_type},{target_index})"]
-            }
-        except Exception as e:
-            return {
-                MSG: [f"{self.name} move failed due to an unknown reason"]
-            }
-    
-    def upgrade(self, unit: Unit):
-        bench_count = self.bench.count(unit) 
-        field_count = self.field.count(unit) 
-        if bench_count + field_count < 3:
+    def swap(self, where: list[Unit | None], source_index: int, target_index: int) -> None:
+        """Swap occupied slots without changing container length."""
+        where[source_index], where[target_index] = where[target_index], where[source_index]
+
+    def _container(self, source_type: str) -> Bench | None:
+        if source_type in ("bench", "b"):
+            return self.bench
+        if source_type in ("field", "f"):
+            return self.field
+        return None
+
+    def move_unit(
+        self, source_type: str, target_type: str, source_index: int, target_index: int
+    ) -> dict[str, list[str]]:
+        """Move or swap slots atomically after validating board capacity."""
+        source, target = self._container(source_type), self._container(target_type)
+        if not self.is_alive() or source is None or target is None:
+            return {MSG: [f"{self.name} invalid move"]}
+        if not 0 <= source_index < source.num_slots:
+            return {MSG: [f"{self.name} invalid source index"]}
+        if target_index == -1:
+            target_index = target.find_empty()
+        if not 0 <= target_index < target.num_slots or source[source_index] is None:
+            return {MSG: [f"{self.name} invalid target or empty source"]}
+        if source is not target and target[target_index] is None and target.is_full():
+            return {MSG: [f"{self.name} {target_type} is full"]}
+        source.units[source_index], target.units[target_index] = (
+            target.units[target_index],
+            source.units[source_index],
+        )
+        self.log.append(
+            {"type": "move_unit", "args": [source_type, target_type, source_index, target_index]}
+        )
+        return {MSG: [f"{self.name} moved unit"]}
+
+    def upgrade(self, unit: Unit) -> Unit | None:
+        """Merge three matching units without changing reserved base copies."""
+        matches = [
+            (container, index)
+            for container in (self.field, self.bench)
+            for index, candidate in enumerate(container.units)
+            if candidate is not None
+            and candidate.unit_id == unit.unit_id
+            and candidate.level == unit.level
+        ]
+        if len(matches) < 3 or unit.level >= 3:
             return None
-        upgrade_unit = self.pool.get_unit(unit.name, unit.level+1)
-        if bench_count == 0:
-            self.field.remove(unit)
-            self.field.remove(unit)
-            self.field.remove(unit)
-            self.field.add(upgrade_unit)
-        elif bench_count == 1:
-            self.bench.remove(unit)
-            self.field.remove(unit)
-            self.field.remove(unit)
-            self.field.add(upgrade_unit)
-        elif bench_count == 2:
-            self.bench.remove(unit)
-            self.bench.remove(unit)
-            self.field.remove(unit)
-            self.field.add(upgrade_unit)
-        elif bench_count == 3:
-            self.bench.remove(unit)
-            self.bench.remove(unit)
-            self.bench.remove(unit)
-            self.bench.add(upgrade_unit)
-        return upgrade_unit
-    
-    def reroll(self):
-        if not self.is_alive():
-            return {
-                MSG: [f"{self.name} is not alive"]
-            }
-        if self.gold < 2:
-            return {
-                MSG: [f"{self.name} has not enough gold to reroll"]
-            }
-        else:
-            self.gold -= 2
-            self.refresh_shop()
-            self.log.append({'type': 'reroll'})
-            return {
-                MSG: [f"{self.name} reroll"]
-            }
+        upgraded = self.pool.get_unit(unit.name, unit.level + 1)
+        for container, index in matches[:3]:
+            container.units[index] = None
+        container, index = matches[0]
+        container.units[index] = upgraded
+        return upgraded
 
-    def get_appearance_rate(self):
-        if self.level == 1:
-            appearance_rate = [1.00, 0.00, 0.00, 0.00, 0.00]
-        elif self.level == 2:
-            appearance_rate = [1.00, 0.00, 0.00, 0.00, 0.00]
-        elif self.level == 3:
-            appearance_rate = [0.75, 0.25, 0.00, 0.00, 0.00]
-        elif self.level == 4:
-            appearance_rate = [0.55, 0.30, 0.15, 0.00, 0.00]
-        elif self.level == 5:
-            appearance_rate = [0.45, 0.33, 0.20, 0.02, 0.00]
-        elif self.level == 6:
-            appearance_rate = [0.30, 0.40, 0.25, 0.05, 0.00]
-        elif self.level == 7:
-            appearance_rate = [0.19, 0.30, 0.40, 0.10, 0.01]
-        elif self.level == 8:
-            appearance_rate = [0.18, 0.25, 0.32, 0.22, 0.03]
-        elif self.level == 9:
-            appearance_rate = [0.15, 0.20, 0.25, 0.30, 0.10]
-        elif self.level == 10:
-            appearance_rate = [0.05, 0.10, 0.20, 0.40, 0.25]
-        return appearance_rate
-    
-    def get_turn_gold(self, turn):
-        turn_gold = 10
-        interest = min(self.gold % 10, 5)
-        streak_gold = 0
-        if abs(self.streak) >= 2: 
-            streak_gold += min(abs(self.streak), 6)
-        self.interest_list.append(interest)
-        self.streak_gold_list.append(streak_gold)
-        self.turn_gold_list.append(turn_gold)
-        self.gold += interest + streak_gold + turn_gold
-    
-    def win(self):
+    def reroll(self) -> dict[str, list[str]]:
+        """Refresh the shop for two gold."""
+        if not self.is_alive() or self.gold < 2:
+            return {MSG: [f"{self.name} cannot reroll"]}
+        self.gold -= 2
+        self.refresh_shop()
+        self.log.append({"type": "reroll"})
+        return {MSG: [f"{self.name} reroll"]}
+
+    def get_appearance_rate(self) -> list[float]:
+        """Return level-dependent cost-tier probabilities."""
+        rates = (
+            (1, 0, 0, 0, 0),
+            (1, 0, 0, 0, 0),
+            (0.75, 0.25, 0, 0, 0),
+            (0.55, 0.30, 0.15, 0, 0),
+            (0.45, 0.33, 0.20, 0.02, 0),
+            (0.30, 0.40, 0.25, 0.05, 0),
+            (0.19, 0.30, 0.40, 0.10, 0.01),
+            (0.18, 0.25, 0.32, 0.22, 0.03),
+            (0.15, 0.20, 0.25, 0.30, 0.10),
+            (0.05, 0.10, 0.20, 0.40, 0.25),
+        )
+        return list(rates[self.level - 1])
+
+    def get_turn_gold(self, turn: int) -> None:
+        """Pay base income plus capped interest and bounded streak rewards."""
+        self.income_turn = turn
+        income = self.economy()
+        self.interest_list.append(income["interest"])
+        self.streak_gold_list.append(income["streak"])
+        self.turn_gold_list.append(income["base"])
+        self.gold += income["total"]
+        self.income_turn = turn + 1
+
+    def win(self) -> None:
+        """Record a win and its one-gold combat reward."""
         self.combat_result_list.append(1)
         self.gold += 1
-        if self.streak < 0:
-            self.streak = 1
-        else:
-            self.streak += 1
-    
-    def lose(self):
+        self.streak = max(0, self.streak) + 1
+
+    def lose(self) -> None:
+        """Record a loss and update consecutive-loss streak."""
         self.combat_result_list.append(-1)
-        if self.streak > 0:
-            self.streak = -1
-        else:
-            self.streak -= 1
-    
-    def draw(self):
+        self.streak = min(0, self.streak) - 1
+
+    def draw(self) -> None:
+        """Record a draw and reset the streak."""
         self.combat_result_list.append(0)
         self.streak = 0
-    
-    def get_turn_exp(self):
+
+    def get_turn_exp(self) -> None:
+        """Grant the two natural experience points earned after combat."""
         self.give_exp(2)
 
-    def refresh_shop(self):
-        for u in self.shop.units:
-            if u is None:
+    def refresh_shop(self) -> None:
+        """Return unsold offers and reserve up to five independent replacements."""
+        for unit in self.shop.units:
+            if unit is not None:
+                self.pool.add_unit(unit)
+        self.shop.units = []
+        rates = self.get_appearance_rate()
+        for _ in range(self.shop.num_slots):
+            costs = [
+                cost
+                for cost in range(1, 6)
+                if rates[cost - 1] > 0
+                and any(count > 0 for count in self.pool.available_units[cost].values())
+            ]
+            if not costs:
+                self.shop.units.append(None)
                 continue
-            self.pool.add_unit(u)
-        self.shop.clear()
-        appearance_rate = self.get_appearance_rate()
-        chosen_costs = np.random.choice(
-            np.arange(1, 6),
-            size=(5,),
-            replace=True,
-            p=appearance_rate
-        )
-        for cost in chosen_costs:
-            unit_pool = []
-            for k,v in self.pool.available_units[cost].items():
-                for _ in range(v):
-                    unit_pool.append(k)
-            chosen_unit = random.choice(unit_pool)
-            self.pool.remove_unit(self.pool.unit_dict[chosen_unit])
-            self.shop.units.append(self.pool.unit_dict[chosen_unit])
+            cost = self.pool.rng.choices(costs, weights=[rates[tier - 1] for tier in costs], k=1)[0]
+            self.shop.units.append(self.pool.sample(cost))
 
-    def purchase_unit(self, shop_idx: int):
-        if not self.is_alive():
-            return {
-                MSG: [f"{self.name} is not alive"]
-            }
-        if self.shop.units[shop_idx] is None:
-            return {
-                MSG: [f"{self.name} tried to buy invalid index in shop"]
-            }
+    def _make_purchase_room(self, unit: Unit) -> bool:
+        if not self.bench.is_full():
+            self.bench.add(unit)
+            return True
+        matches = [
+            (container, index)
+            for container in (self.field, self.bench)
+            for index, owned in enumerate(container.units)
+            if owned is not None and owned.unit_id == unit.unit_id and owned.level == 1
+        ]
+        if len(matches) < 2:
+            return False
+        for container, index in matches[:2]:
+            container.units[index] = None
+        container, index = matches[0]
+        container.units[index] = self.pool.get_unit(unit.name, 2)
+        return True
+
+    def purchase_unit(self, shop_idx: int) -> dict[str, list[str]]:
+        """Buy a reserved offer, merging three copies when space is available."""
+        if not self.is_alive() or not 0 <= shop_idx < self.shop.num_slots:
+            return {MSG: [f"{self.name} invalid shop index"]}
         unit = self.shop.units[shop_idx]
-        purchased_unit = copy.deepcopy(self.pool.unit_dict[unit.name])
-        if self.gold < purchased_unit.cost:
-            return {
-                MSG: [f"{self.name} does not have enough gold"]
-            }
-        messages = []
-        index = self.bench.add(purchased_unit)
-        messages.append(f"{self.name} try to buy {purchased_unit.unit_id}.")
-        if index == -1:
-            if self.bench.count(purchased_unit) + self.field.count(purchased_unit) >= 2:
-                if self.bench.count(purchased_unit) >= 2:
-                    self.bench.remove(purchased_unit)
-                    self.bench.remove(purchased_unit)
-                    self.bench.add(self.pool.get_unit(purchased_unit.name, 2))
-                elif self.bench.count == 1:
-                    self.bench.remove(purchased_unit)
-                    self.field.remove(purchased_unit)
-                    self.field.add(self.pool.get_unit(purchased_unit.name, 2))
-                else:
-                    self.field.remove(purchased_unit)
-                    self.field.remove(purchased_unit)
-                    self.field.add(self.pool.get_unit(purchased_unit.name, 2))
-                messages.append(f"{self.name} upgrade {purchased_unit.unit_id} to level 2")
-            else:
-                messages.append(f"{self.name} does not have enough bench room.")
-                return messages
-        self.gold -= purchased_unit.cost
+        if unit is None or self.gold < unit.cost:
+            return {MSG: [f"{self.name} cannot buy this unit"]}
+        if not self._make_purchase_room(unit):
+            return {MSG: [f"{self.name} does not have enough bench room"]}
+        self.gold -= unit.cost
         self.shop.units[shop_idx] = None
-        self.log.append({'type': 'buy_unit', 'args': purchased_unit.unit_id})
-        messages.append(f"{self.name} successfully bought {purchased_unit.unit_id}.")
-        upgrade_unit = purchased_unit
-        for _ in range(1,4):
-            upgrade_unit = self.upgrade(upgrade_unit)
-            if upgrade_unit is not None:
-                self.log.append({'type': 'upgrade_unit', 'args': upgrade_unit.unit_id})
-                messages.append(f"{self.name} upgrade ({upgrade_unit.unit_id}, {upgrade_unit.level})")
-            else:
-                break
-        return {
-            MSG: messages
-        }
-        
-    def sell_unit(self, source_type, index: int):
-        if not self.is_alive():
-            return {
-                MSG: [f"{self.name} is not alive"]
-            }
-        source = None
-        if source_type in ['bench', 'b']:
-            source = self.bench
-        else:
-            source = self.field
-        if source.units[index] is None:
-            return {
-                MSG: [f"{self.name} does not have unit at {source_type} index {index}."]
-            }
-        else:
-            _unit = source.pop(index)
-            earn_gold = _unit.get_sell_gold()
-            self.gold += earn_gold
-            self.pool.add_unit(_unit)
-            self.log.append({'type': 'sell_unit', 'args': _unit.unit_id})
-            return {
-                MSG: [f"{self.name} sold level {_unit.level} - {_unit.unit_id}, earned {earn_gold} gold."]
-            }
-    
-    def add_gold(self, amount: int):
+        self.log.append({"type": "buy_unit", "args": unit.unit_id})
+        for level in range(1, 3):
+            upgraded = self.upgrade(self.pool.get_unit(unit.name, level))
+            if upgraded is not None:
+                self.log.append({"type": "upgrade_unit", "args": upgraded.unit_id})
+        return {MSG: [f"{self.name} successfully bought {unit.unit_id}"]}
+
+    def sell_unit(self, source_type: str, index: int) -> dict[str, list[str]]:
+        """Sell an owned unit and return its represented copies to the pool."""
+        source = self._container(source_type)
+        if not self.is_alive() or source is None or not 0 <= index < source.num_slots:
+            return {MSG: [f"{self.name} invalid sale"]}
+        unit = source.units[index]
+        if unit is None:
+            return {MSG: [f"{self.name} has no unit at index {index}"]}
+        source.units[index] = None
+        self.gold += unit.get_sell_gold()
+        self.pool.add_unit(unit)
+        self.log.append({"type": "sell_unit", "args": unit.unit_id})
+        return {MSG: [f"{self.name} sold {unit.unit_id}"]}
+
+    def add_gold(self, amount: int) -> dict[str, list[str]]:
+        """Apply an explicit gold grant used by existing debug callers."""
         self.gold += int(amount)
+        return {MSG: [f"{self.name} gold + {amount}"]}
+
+    def play_randomly(self) -> None:
+        """Run the deterministic filler policy, preserving the legacy entrypoint."""
+        if not self.is_bot or not self.is_alive():
+            return
+        for index in range(self.shop.num_slots):
+            self.purchase_unit(index)
+        if self.gold >= 8 and self.level < MAX_LEVEL:
+            self.purchase_exp()
+        self._deploy_best_team()
+
+    def _deploy_best_team(self) -> None:
+        owned = [unit for unit in self.field.units + self.bench.units if unit is not None]
+        owned.sort(
+            key=lambda unit: (
+                unit.status.hp
+                * unit.status.attack
+                * unit.status.attackSpeed
+                * (1 + unit.status.defense / 100)
+            ),
+            reverse=True,
+        )
+        selected = owned[: self.field.max_units]
+        reserves = owned[self.field.max_units :]
+        self.field.units = [None] * self.field.num_slots
+        self.bench.units = reserves + [None] * (self.bench.num_slots - len(reserves))
+        # Home rows 0..3 run from the back line toward the enemy. Select
+        # unoccupied preferred slots so mixed-role teams never overwrite units.
+        front = tuple(row * 7 + col for row in (3, 2, 1, 0) for col in range(7))
+        back = tuple(range(28))
+        for unit in selected:
+            ranged = role_for_status(unit.status.attackRange, unit.status.defense) == "marksman"
+            preferred = back if ranged else front
+            slot = next(index for index in preferred if self.field.units[index] is None)
+            self.field.units[slot] = unit
+        self.log.append({"type": "bot_deploy", "args": [unit.unit_id for unit in selected]})
+
+    def release_holdings(self) -> None:
+        """Return eliminated players' shop, bench and team copies exactly once."""
+        for container in (self.shop, self.bench, self.field):
+            for index, unit in enumerate(container.units):
+                if unit is not None:
+                    self.pool.add_unit(unit)
+                    container.units[index] = None
+
+    def get_history(self) -> dict[str, Any]:
+        """Return legacy-compatible action and economy history."""
         return {
-                MSG: [f"{self.name} gold + 100."]
-        }
-        
-    def play_randomly(self):
-        pass
-    
-    def get_history(self):
-        return {
-            'log': self.log,
-            'combat': self.combat_result_list,
-            'interest': self.interest_list,
-            'streak_gold': self.streak_gold_list,
-            'turn_gold': self.turn_gold_list,
+            "log": list(self.log),
+            "combat": self.combat_result_list,
+            "interest": self.interest_list,
+            "streak_gold": self.streak_gold_list,
+            "turn_gold": self.turn_gold_list,
         }

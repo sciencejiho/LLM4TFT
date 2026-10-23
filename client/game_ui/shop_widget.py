@@ -1,69 +1,50 @@
-from PyQt6.QtWidgets import QApplication, QWidget, QHBoxLayout, QPushButton, QVBoxLayout, QLabel
-from ..game_ui.util import unit_to_shop_text, get_color
-from ..baseWidget import BaseWidget
+"""Shop offers expose inspection and explicit affordable purchase actions."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+
 from .drag_widget import DraggableLabel
-import json
+from .util import get_cost
 
-class ShopWidget(BaseWidget):
-    def __init__(self, parent):
-        super().__init__("client/game_ui/game_styles.qss")
-        self.parent = parent
-        main_layout = QHBoxLayout()
-        label = QLabel("Shop")
-        
-        main_layout.addWidget(label)
 
-        self.button_layout = QHBoxLayout()
-        self.buttons = [] 
-        
-        button_names = ["button 1", "button 2", "button 3", "button 4", "button 5"]
-        for index, name in enumerate(button_names):
-            btn = DraggableLabel(self,name, 'shop', index)
-            btn.clicked.connect(lambda _, i=index: self.parent.view_unit('shop', i))
-            self.button_layout.addWidget(btn)
-            self.buttons.append(btn)
+class ShopWidget(QWidget):
+    """Five persistent shop offers and purchase buttons."""
 
-        main_layout.addLayout(self.button_layout)
-        self.setAcceptDrops(True)  # Accept drops
-        self.setLayout(main_layout)
+    def __init__(self, parent: Any) -> None:
+        super().__init__()
+        self.controller = parent
+        self.buttons: list[DraggableLabel] = []
+        self.buy_buttons: list[QPushButton] = []
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        for index in range(5):
+            column = QVBoxLayout()
+            card = DraggableLabel(self, source="shop", index=index)
+            card.clicked.connect(lambda checked=False, i=index: parent.view_unit("shop", i))
+            purchase = QPushButton("Buy")
+            purchase.clicked.connect(
+                lambda checked=False, i=index: parent.send_command("buy_unit", i)
+            )
+            column.addWidget(card, 1)
+            column.addWidget(purchase)
+            layout.addLayout(column, 1)
+            self.buttons.append(card)
+            self.buy_buttons.append(purchase)
 
-    def dropped(self, data):
-        if data is None:
-            pass
-        else:
-            if data['source'] in ["field", "bench"]:
-                self.parent.send_command('sell_unit', data['source'], data['index'])
-    
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasText():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-                
-    def dropEvent(self, event):
-        data = event.mimeData().data("application/json").data().decode("utf-8")
-        data = json.loads(data)
-        if data['source'] in ["field", "bench"]:
-            self.parent.send_command('sell_unit', data['source'], data['index'])
-        self.parent.refresh_style()
-        event.acceptProposedAction()
-                
-    def update_state(self, data):
-        unit_list = data['units']
-        for index, button in enumerate(self.buttons):
-            unit = unit_list[index]
-            color, hover_color = get_color(unit)
-            if unit is not None:
-                button.dragable = True
-            else:
-                button.dragable = False
-            button.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {color};
-                    color: white;
-                }}
-                QPushButton:hover {{
-                    background-color: {hover_color};
-                }}
-            """)
-            button.setText(unit_to_shop_text(unit))
+    def update_state(self, data: dict[str, Any]) -> None:
+        """Refresh offers with ownership, preparation and gold checks."""
+        units = data.get("units", [])
+        for index in range(5):
+            unit = units[index] if index < len(units) else None
+            affordable = self.controller.can_buy(index)
+            self.buttons[index].set_unit(unit, self.controller.can_edit() and affordable)
+            self.buy_buttons[index].setText(f"Buy · {get_cost(unit)} gold" if unit else "Sold")
+            self.buy_buttons[index].setEnabled(self.controller.can_edit() and affordable)
+
+    def dropped(self, data: dict[str, Any]) -> None:
+        """Sell an owned unit dropped onto a shop offer."""
+        if data["source"] in ("field", "bench"):
+            self.controller.send_command("sell_unit", data["source"], data["index"])

@@ -1,37 +1,41 @@
-from .base import EMPTY
-from .unit import Unit
-from .bench import Bench
+"""Fixed board slots whose deployment limit follows the player's level."""
+
+from __future__ import annotations
+
 import copy
+from typing import Any
+
+from .bench import Bench
+from .unit import Unit
+
 
 class Field(Bench):
-    def __init__(self):
+    """Own the player's 4-by-7 half-board and deployable team slots."""
+
+    def __init__(self) -> None:
         self.max_units = 1
-        self.num_slots = 4 * 7
-        self.units: list[Unit] = [None] * self.num_slots
-        
-    def is_full(self):
-        nones = self.units.count(None)
-        return self.num_slots - nones >= self.max_units
-    
-    def get_combat_mode(self):
-        return [u.get_combat_mode() for u in self.units]
-    
-    def level_up(self):
-        self.max_units += 1
-        # self.units.append(None)
-    
-    def update(self):
-        for u in self.units:
-            u.update()
-    
-    def __deepcopy__(self, memo):
-        # Create a new instance of Field
-        field_copy = type(self)()
-        # Copy the max_units attribute
-        field_copy.max_units = self.max_units
-        field_copy.num_slots = self.num_slots
-        # Deep copy the units list
-        field_copy.units = copy.deepcopy(self.units, memo)
-        # Store the new object in the memo dictionary
-        memo[id(self)] = field_copy
-        return field_copy
+        self.num_slots = 28
+        self.units: list[Unit | None] = [None] * self.num_slots
+
+    def get_combat_mode(self) -> list[dict[str, Any] | None]:
+        """Serialize units and preserve empty board slots."""
+        return [unit.get_combat_mode() if unit is not None else None for unit in self.units]
+
+    def level_up(self) -> None:
+        """Increase deployment capacity up to the supported player level cap."""
+        self.max_units = min(10, self.max_units + 1)
+
+    def update(self) -> None:
+        """Advance occupied units by the legacy default simulation tick."""
+        for index in range(self.num_slots):
+            unit = self.units[index]
+            if unit is not None:
+                unit.update()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Field:
+        result = type(self)()
+        memo[id(self)] = result
+        result.max_units = self.max_units
+        result.num_slots = self.num_slots
+        result.units = copy.deepcopy(self.units, memo)
+        return result

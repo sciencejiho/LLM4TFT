@@ -1,60 +1,19 @@
-import sys
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QPushButton, QProgressBar,
-    QVBoxLayout, QGridLayout, QSpacerItem, QSizePolicy
-)
-from PyQt6.QtCore import Qt
-from ..game_ui.util import unit_to_text
+"""Combat cards reuse the same presentation as preparation cards."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .drag_widget import DraggableLabel
 
 
-class BattleUnitWidget(QWidget):
-    def __init__(self, unit, color, hover_color, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.unit = unit
+class BattleUnitWidget(DraggableLabel):
+    """A non-draggable card retaining its live HP and role across battle ticks."""
 
-        # 레이아웃 설정
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.setLayout(layout)
+    def __init__(self, parent: Any, index: int) -> None:
+        super().__init__(parent, source="battle", index=index, dragable=False)
+        self.setMinimumHeight(36)
 
-        # 버튼 생성
-        self.button = QPushButton(unit_to_text(unit) if unit else "")
-        self.button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {color};
-                color: white;
-            }}
-            QPushButton:hover {{
-                background-color: {hover_color};
-            }}
-        """)
-        layout.addWidget(self.button)
-        self.health_bar = QProgressBar()
-        self.space_ = QSpacerItem(10, 10, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        health_bar_color = '#52a332' if unit and unit['team'] == 'home' else '#a35232'
-        self.health_bar.setStyleSheet(f"""
-            QProgressBar {{
-                border: 1px solid grey;
-                border-radius: 4px;
-                font-size: 8px;
-                height: 10px;
-                color: black;
-            }}
-            QProgressBar::chunk {{
-                border-radius: 4px;
-                background-color: {health_bar_color};
-            }}
-        """)
-        self.health_bar.setTextVisible(True)
-        self.health_bar.setFormat('%v/%m')
-        if unit:
-            # 체력 바 생성
-            self.health_bar.setRange(0, int(unit['status']['max_hp']) if unit else 100)
-            self.health_bar.setValue(int(unit['status']['hp']) if unit else 0)
-            layout.addWidget(self.health_bar)
-        else:
-            self.health_bar.setRange(0, 100)
-            self.health_bar.setValue(0)
-        # 전체 위젯의 스타일 설정
-        self.setStyleSheet("background-color: transparent;")
+    def update_state(self, unit: dict[str, Any] | None) -> None:
+        """Refresh combat stats without replacing the button."""
+        self.set_unit(unit)

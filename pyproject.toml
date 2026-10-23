@@ -1,7 +1,7 @@
 [project]
-name = "llm4game"
-version = "0.1.0"
-description = "Add your description here"
+name = "llm4tft"
+version = "0.2.0"
+description = "A single-player autobattler workbench for LLM research and decision data"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -10,5 +10,27 @@ dependencies = [
     "openai>=1.95.1",
     "pyqt6>=6.9.1",
     "python-socketio>=5.13.0",
-    "socketio>=0.2.1",
 ]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=8.4.2",
+    "ruff>=0.17.2",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = true
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+check_untyped_defs = true
