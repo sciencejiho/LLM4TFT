@@ -1,67 +1,48 @@
-from PyQt6.QtWidgets import QLineEdit, QGridLayout, QHBoxLayout, QPushButton, QSizePolicy
-from PyQt6.QtCore import QSize
-from .drag_widget import DraggableLabel
+"""An eight-by-seven combat arena with a fixed widget population."""
 
-from ..game_ui.util import unit_to_text, get_color
-from ..baseWidget import BaseWidget
+from __future__ import annotations
+
+from typing import Any
+
+from PyQt6.QtWidgets import QGridLayout, QSizePolicy, QWidget
+
 from .battle_unit_widget import BattleUnitWidget
-import json
 
-class BattleWidget(BaseWidget):
-    def __init__(self, parent):
-        super().__init__("client/game_ui/game_styles.qss")
-        self.parent = parent
-        main_layout = QHBoxLayout()
-        
-        self.raw_data = QLineEdit()
-        self.unit_layout = QGridLayout()
-        self.unit_buttons = [] 
-        
-        # main_layout.addWidget(self.raw_data)
-        main_layout.addLayout(self.unit_layout)
 
-        self.setLayout(main_layout)
+class BattleWidget(QWidget):
+    """Show either team's perspective using 56 persistent card widgets."""
 
-    def clear_button_layout(self):
-        """Clear all widgets from self.button_layout"""
-        self.unit_buttons.clear()
-        while self.unit_layout.count():
-            item = self.unit_layout.takeAt(0)  # Take the first item
-            widget = item.widget()  # Get the widget
-            if widget:
-                widget.deleteLater()  # Properly delete the widget
+    def __init__(self, parent: Any) -> None:
+        super().__init__()
+        self.controller = parent
+        self.unit_layout = QGridLayout(self)
+        self.unit_layout.setContentsMargins(0, 0, 0, 0)
+        self.unit_layout.setSpacing(4)
+        self.unit_buttons: list[BattleUnitWidget] = []
+        for index in range(56):
+            button = BattleUnitWidget(self, index)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            button.clicked.connect(lambda checked=False, i=index: self._select(i))
+            self.unit_layout.addWidget(button, index // 7, index % 7)
+            self.unit_buttons.append(button)
 
-    def update_state(self, data):
-        self.clear_button_layout()
-        self.raw_data.setText(f'{data}')
-        if not data:
-            return
-        team = data['team']
-        arena = data['arena']
-        button = QPushButton()
-        button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: #cccccc;
-                color: white;
-            }}
-        """)
-        units = [[None for j in range(7)] for i in range(8)]
-        
-        for unit_info in arena:
-            unit = unit_info['unit']
-            pos = unit_info['pos']
-            name = unit_to_text(unit)
-            if team == 'home':
-                units[7-pos[0]][pos[1]] = unit
-            else:
-                units[pos[0]][6-pos[1]] = unit
+    def _select(self, index: int) -> None:
+        self.controller.view_unit("battle", index)
 
-        for row in range(8):
-            for col in range(7):
-                unit = units[row][col]
-                color, hover_color = get_color(unit)
-                button = BattleUnitWidget(unit, color, hover_color)
-                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                self.unit_layout.addWidget(button, row, col)
-                self.unit_buttons.append(button) 
-                
+    def update_state(self, data: dict[str, Any] | None) -> None:
+        """Map an arena snapshot to reusable cards, including an empty snapshot."""
+        units: list[dict[str, Any] | None] = [None] * 56
+        if data:
+            if len(data.get("arena", [])) > 56:
+                raise ValueError("Combat snapshot exceeds the 56-slot arena")
+            for item in data.get("arena", [])[:56]:
+                row, col = item["pos"]
+                if not 0 <= row < 8 or not 0 <= col < 7:
+                    continue
+                row, col = (7 - row, col) if data.get("team") == "home" else (row, 6 - col)
+                unit = dict(item["unit"])
+                own_team = data.get("team", "home")
+                unit["team"] = "home" if unit.get("team", own_team) == own_team else "away"
+                units[row * 7 + col] = unit
+        for index in range(56):
+            self.unit_buttons[index].update_state(units[index])

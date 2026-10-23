@@ -1,15 +1,17 @@
+"""Public desktop screens and the worker connection interface."""
+
+from .baseWidget import BaseWidget
 from .game import GameScreen
 from .home import HomeScreen
 from .lobby import LobbyScreen
 from .login import LoginScreen
 from .socket import SocketThread
-from .baseWidget import BaseWidget
 
-__all__ = [
+__all__ = (
+    "BaseWidget",
     "GameScreen",
     "HomeScreen",
     "LobbyScreen",
     "LoginScreen",
     "SocketThread",
-    "BaseWidget",
-]
+)

@@ -1,139 +1,154 @@
-from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy
-from ..game_ui.util import unit_to_text, get_info, get_price
-from ..baseWidget import BaseWidget
+"""Selected-unit inspector exposing only mechanics implemented by the engine."""
+
+from __future__ import annotations
+
+from typing import Any
+
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QFrame, QGridLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
 
-class UnitWidget(BaseWidget):
-    def __init__(self, parent):
-        super().__init__("client/game_ui/unit_styles.qss")
-        self.parent = parent
+from .role_icon import role_icon
+from .util import ROLE_COLORS, get_price, unit_details
 
-        # 메인 레이아웃
-        self.main_layout = QVBoxLayout()
-        self.main_layout.setSpacing(5)  # 전체 여백 최소화
-        self.main_layout.setContentsMargins(5, 5, 5, 5)
 
-        # ----- [1] Unit Basic Information (Compact) -----
+class UnitWidget(QFrame):
+    """Explain a unit's role, placement, scaled stats and available action."""
+
+    def __init__(self, parent: Any) -> None:
+        super().__init__()
+        self.controller = parent
+        self.setObjectName("panel")
+        self.setMinimumWidth(244)
+        self.setMaximumWidth(290)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+        title = QLabel("UNIT INSPECTOR")
+        title.setObjectName("eyebrow")
+        self.portrait = QLabel()
+        self.portrait.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.name_label = QLabel()
+        self.name_label.setObjectName("sectionTitle")
+        self.name_label.setWordWrap(True)
         self.gold_label = QLabel()
+        self.gold_label.setObjectName("muted")
+        self.role_label = QLabel()
+        self.role_label.setObjectName("heroRole")
+        self.placement_label = QLabel()
+        self.description_label = QLabel()
+        self.description_label.setWordWrap(True)
+        self.description_label.setObjectName("muted")
+        self.health_bar = QProgressBar()
+        self.health_bar.setFixedHeight(18)
+        self.health_bar.setFormat("%v / %m HP")
+        self._build_stats()
+        self.action_button = QPushButton("Select a unit")
+        self.action_button.clicked.connect(self._action)
+        for widget in (
+            title,
+            self.portrait,
+            self.name_label,
+            self.gold_label,
+            self.role_label,
+            self.placement_label,
+            self.description_label,
+            self.health_bar,
+        ):
+            layout.addWidget(widget)
+        layout.addLayout(self.stats)
+        layout.addStretch()
+        layout.addWidget(self.action_button)
+        self.update_state(None)
 
-        unit_info_layout = QHBoxLayout()  # 가로 정렬
-        unit_info_layout.setSpacing(3)
-        unit_info_layout.addWidget(self.name_label)
-        unit_info_layout.addWidget(self.gold_label)
-
-        # ----- [2] Traits (Synergy, Items) -----
-        self.synergy_label = QLabel()
-        self.item_label = QLabel()
-
-        trait_layout = QHBoxLayout()  # 가로 정렬
-        trait_layout.setSpacing(3)
-        trait_layout.addWidget(self.synergy_label)
-        trait_layout.addWidget(self.item_label)
-
-        # ----- 상단 정보 (기본 정보 + 특성) 가로 배치 -----
-        top_layout = QVBoxLayout()
-        top_layout.addLayout(unit_info_layout)
-        top_layout.addLayout(trait_layout)
-
-        # ----- [3] Status Information (3개 열로 배치) -----
+    def _build_stats(self) -> None:
         self.hp_label = QLabel()
-        self.mp_label = QLabel()
         self.attack_label = QLabel()
         self.defense_label = QLabel()
         self.attack_speed_label = QLabel()
-        self.special_attack_label = QLabel()
-        self.special_defense_label = QLabel()
-        self.critical_rate_label = QLabel()
-        self.critical_damage_label = QLabel()
         self.attack_range_label = QLabel()
+        self.critical_label = QLabel()
+        self.stats = QGridLayout()
+        labels = (
+            self.hp_label,
+            self.attack_label,
+            self.defense_label,
+            self.attack_speed_label,
+            self.attack_range_label,
+            self.critical_label,
+        )
+        for index in range(6):
+            labels[index].setWordWrap(True)
+            labels[index].setMinimumHeight(42)
+            self.stats.addWidget(labels[index], index // 2, index % 2)
 
-        # 상태 정보를 3열로 정렬
-        left_status_layout = QVBoxLayout()
-        left_status_layout.setSpacing(3)
-        left_status_layout.addWidget(self.hp_label)
-        left_status_layout.addWidget(self.mp_label)
-        left_status_layout.addWidget(self.attack_label)
-        left_status_layout.addWidget(self.defense_label)
+    def update_state(self, unit: dict[str, Any] | None) -> None:
+        """Display a selected unit's actual current stats or a useful empty state."""
+        self.unit = unit
+        info = unit_details(unit)
+        self.name_label.setText(info["name"] if unit else "Select a unit")
+        self.gold_label.setText(
+            f"{'★' * info['level']}   ·   {info['cost']} gold"
+            if unit
+            else "Click a board, bench or shop card"
+        )
+        role = info["role"]
+        self.portrait.setPixmap(role_icon(role, 82).pixmap(82, 82))
+        self.role_label.setText(role.title() if unit else "Understand your army")
+        self.role_label.setStyleSheet(f"color: {ROLE_COLORS[role]};")
+        placement = {
+            "tank": "Front line",
+            "fighter": "Front / middle line",
+            "marksman": "Back line",
+        }[role]
+        self.placement_label.setText(
+            f"Recommended placement · {placement}" if unit else "Roles guide your positioning"
+        )
+        self.placement_label.setWordWrap(True)
+        self.description_label.setText(
+            info.get(
+                "role_description", "Select a unit to inspect its role, range and combat stats."
+            )
+        )
+        self._update_stats(info["status"])
+        self.refresh_action()
 
-        middle_status_layout = QVBoxLayout()
-        middle_status_layout.setSpacing(3)
-        middle_status_layout.addWidget(self.attack_speed_label)
-        middle_status_layout.addWidget(self.special_attack_label)
-        middle_status_layout.addWidget(self.special_defense_label)
+    def _update_stats(self, status: dict[str, Any]) -> None:
+        maximum = max(1, int(status.get("max_hp", 0)))
+        self.health_bar.setRange(0, maximum)
+        self.health_bar.setValue(max(0, int(status.get("hp", 0))))
+        self.health_bar.setVisible(self.unit is not None)
+        self.hp_label.setText(f"HEALTH\n{status.get('max_hp', 0):g}")
+        self.attack_label.setText(f"ATTACK\n{status.get('attack', 0):g}")
+        self.defense_label.setText(f"ARMOR\n{status.get('defense', 0):g}")
+        self.attack_speed_label.setText(f"ATTACK SPEED\n{status.get('attackSpeed', 0):.2f}")
+        self.attack_range_label.setText(f"RANGE\n{status.get('attackRange', 0):g} cells")
+        self.critical_label.setText(
+            f"CRITICAL\n{status.get('criticalRate', 0):g}% · {status.get('criticalDamage', 1):g}×"
+        )
 
-        right_status_layout = QVBoxLayout()
-        right_status_layout.setSpacing(3)
-        right_status_layout.addWidget(self.critical_rate_label)
-        right_status_layout.addWidget(self.critical_damage_label)
-        right_status_layout.addWidget(self.attack_range_label)
+    def refresh_action(self) -> None:
+        """Recheck selection ownership and affordability after each state change."""
+        selection = self.controller.selection
+        enabled = self.unit is not None and selection is not None and self.controller.can_edit()
+        if selection and selection[0] == "battle":
+            self.action_button.setText("Combat unit · inspect only")
+            self.action_button.setEnabled(False)
+            return
+        if not selection or not self.unit:
+            self.action_button.setText("Select a unit")
+        elif selection[0] == "shop":
+            cost = unit_details(self.unit)["cost"]
+            self.action_button.setText(f"Buy unit · {cost} gold")
+            enabled = enabled and self.controller.can_buy(selection[1])
+        else:
+            self.action_button.setText(f"Sell unit · {get_price(self.unit)} gold")
+        self.action_button.setEnabled(enabled)
 
-        # 3개의 열을 가로로 배치
-        status_layout = QHBoxLayout()
-        status_layout.setSpacing(5)
-        status_layout.addLayout(left_status_layout)
-        status_layout.addLayout(middle_status_layout)
-        status_layout.addLayout(right_status_layout)
-
-        # ----- UI 추가 -----
-        self.main_layout.addLayout(top_layout)
-        self.main_layout.addWidget(self.create_section("⚔️ Status", status_layout))
-
-        self.setLayout(self.main_layout)
-        self.update_state(None)
-
-    def update_state(self, unit):
-        unit_info = get_info(unit)
-        if unit is None:
-            unit = {
-                "cost": 1,
-                "level": 1,
-            }
-        name = unit_to_text(unit)
-        self.name_label.setText(f"{name}")
-        self.name_label.setStyleSheet("""
-            QLabel {
-                background-color:rgb(89, 103, 124);
-                color: white;
-                font-size: 14px;
-                font-weight: bold;
-                border-radius: 10px;
-                padding-bottom: 10px;
-                padding: 4px;    
-                min-width: 80px;
-                min-height: 20px;
-            }
-        """)
-        self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        self.gold_label.setText(f"💰 {get_price(unit)}")
-        self.gold_label.setStyleSheet("""
-            QLabel {
-                background-color:rgb(89, 103, 124);
-                color: white;
-                font-size: 28px;
-                font-weight: bold;
-                border-radius: 10px;
-                padding-bottom: 10px;
-                padding: 4px;    
-                min-width: 80px;
-                min-height: 20px;
-            }
-        """)
-        self.gold_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hp_label.setText(f"❤️ {int(unit_info['hp'])}")
-        self.attack_label.setText(f"ATK {int(unit_info['attack'])}")
-        self.defense_label.setText(f"DEF {int(unit_info['defense'])}")
-        self.attack_speed_label.setText(f"Speed {float(unit_info['attackSpeed']):.2f}")
-        self.attack_range_label.setText(f"🏹 {int(unit_info['attackRange'])}")
-
-    def create_section(self, title, layout):
-        frame = QFrame()
-        title_label = QLabel(f"<b>{title}</b>")
-
-        section_layout = QVBoxLayout()
-        section_layout.addWidget(title_label)
-        section_layout.addLayout(layout)  
-
-        frame.setLayout(section_layout)  
-        return frame
+    def _action(self) -> None:
+        if not self.controller.selection:
+            return
+        source, index = self.controller.selection
+        if source == "shop":
+            self.controller.send_command("buy_unit", index)
+        else:
+            self.controller.send_command("sell_unit", source, index)
